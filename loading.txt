@@ -1,0 +1,88 @@
+package main
+
+import (
+	"fmt"
+	"log"
+	"net/http"
+	"strings"
+
+	"github.com/dgrijalva/jwt-go"
+	"github.com/gorilla/handlers"
+	"github.com/gorilla/mux"
+)
+
+const keycloakRealm = "ashahane"
+const keycloakClientID = "myclient"
+
+const keycloakPublicKey = `
+-----BEGIN PUBLIC KEY-----
+MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEApuKSnkxY4HMW3wNEFhrDLgo5hUa5kNs9MSFl48nbZ4brSmg4J/WzM9rtBgyMvmQN82VC2qu7A0/inUNEPD22vb7U6V8U1KVnCFkPbXCIqjZZsYesfeb5AfiHDuC2dsIdZzLku6ZRL4DkGm55wN68khIEJEIttges+XDubs9vh18UgIPRdXpza0f/BKBlmapYr2trCYCIQKSFXv7AvBW9nLMf2VchPZhqg6P8ePDW+f6aP/xzGvFk/dYw0G3bh9J3orFtNJDFrWSfhSIY0xco3aNDbP+gqtnz272/HRKRSz9Mc3tKXoUN7H+6AdvjNRX+EYc4jYcYJmIRGv9xNsRuAQIDAQAB
+-----END PUBLIC KEY-----
+`
+
+func main() {
+	r := mux.NewRouter()
+
+	// Use the handlers.CORS middleware with the appropriate options
+	corsMiddleware := handlers.CORS(
+		handlers.AllowedOrigins([]string{"http://localhost:3001"}), // Allow requests from http://localhost:3001
+		handlers.AllowedMethods([]string{"GET", "POST", "PUT", "DELETE", "OPTIONS"}), // Allow the specified HTTP methods
+		handlers.AllowedHeaders([]string{"Authorization", "Content-Type"}), // Allow specific request headers
+		handlers.AllowCredentials(), // Allow credentials (cookies, authorization headers)
+	)
+
+	// Add preflight headers to allow handling OPTIONS requests
+	preflightHeaders := handlers.AllowedHeaders([]string{
+		"Authorization",
+		"Content-Type",
+		"X-Requested-With",
+	})
+	r.Methods("OPTIONS").Handler(handlers.CORS(preflightHeaders)(nil))
+
+	r.Use(corsMiddleware) // Use the CORS middleware
+
+	r.HandleFunc("/", homeHandler)
+	r.HandleFunc("/api/resource", authenticateMiddleware(getResource)).Methods("GET")
+
+	port := 8000
+	fmt.Printf("Starting server on port %d...\n", port)
+	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d", port), r))
+}
+
+func homeHandler(w http.ResponseWriter, r *http.Request) {
+	fmt.Println("Received request for the home page")
+	fmt.Fprintf(w, "Hello, this is the home page!")
+}
+
+func getResource(w http.ResponseWriter, r *http.Request) {
+	fmt.Println("Received request for protected resource")
+	w.Header().Set("Content-Type", "application/json")
+	fmt.Fprintf(w, `{"data": "This is a protected resource"}`)
+}
+
+func authenticateMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		fmt.Println("Authenticating request...")
+		authHeader := r.Header.Get("Authorization")
+		if authHeader == "" {
+			fmt.Println("Authorization header not found")
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		bearerToken := strings.TrimPrefix(authHeader, "Bearer ")
+		token, err := jwt.Parse(bearerToken, func(token *jwt.Token) (interface{}, error) {
+			return jwt.ParseRSAPublicKeyFromPEM([]byte(keycloakPublicKey))
+		})
+
+		if err != nil || !token.Valid || token.Header["alg"] != jwt.SigningMethodRS256.Name {
+			fmt.Println("Token validation failed or unauthorized request")
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return
+		}
+
+		fmt.Println("Request authenticated successfully")
+		next.ServeHTTP(w, r)
+	}
+}
+
